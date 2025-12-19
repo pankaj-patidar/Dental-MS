@@ -48,6 +48,15 @@ frappe.ui.form.on('Patient Encounter', {
 		refresh_field('drug_prescription');
 		refresh_field('lab_test_prescription');
 
+		if(!frm.doc.odontogram) {
+            frm.doc.odontogram = Array(32).fill(1); // 32 teeth, all healthy by default
+            frm.refresh_field('odontogram');
+        }
+
+        // Render chart
+		render_odontogram(frm);
+        apply_saved_colors(frm);
+
 		if (!frm.doc.__islocal) {
 			if (frm.doc.docstatus === 1) {
 				if(!['Discharge Scheduled', 'Admission Scheduled', 'Admitted'].includes(frm.doc.inpatient_status)) {
@@ -337,7 +346,142 @@ frappe.ui.form.on('Patient Encounter', {
 		});
 	},
 
-});
+})
+
+// Mapping statuses to fixed professional colors
+const STATUS_COLORS = {
+    'Caries': '#FF5858',   // Red
+    'Filled': '#5897FF',   // Blue
+    'Missing': '#4a4a4a',  // Dark Grey
+    'Bridge': '#FACC15',   // Golden/Yellow
+    'Healthy': '#FFFFFF'   // White
+};
+
+function render_odontogram(frm) {
+    const container = $(frm.fields_dict.odontogram_html.wrapper);
+    const upper_teeth = [18, 17, 16, 15, 14, 13, 12, 11, 21, 22, 23, 24, 25, 26, 27, 28];
+    const lower_teeth = [48, 47, 46, 45, 44, 43, 42, 41, 31, 32, 33, 34, 35, 36, 37, 38];
+
+    let html = `
+        <div class="odontogram-container" style="background:#fff; border:1px solid #d1d8dd; padding:20px; border-radius:8px; box-shadow: inset 0 0 5px rgba(0,0,0,0.05);">
+            
+            <div style="text-align:center; color:#888; font-size:10px; text-transform:uppercase; margin-bottom:10px; letter-spacing:1px;">Upper Jaw (Maxilla)</div>
+            
+            <div style="display:flex; justify-content:center; margin-bottom:25px; flex-wrap:nowrap;">
+                ${upper_teeth.map(n => get_tooth_svg(n)).join('')}
+            </div>
+
+            <div style="text-align:center; color:#888; font-size:10px; text-transform:uppercase; margin-bottom:10px; letter-spacing:1px;">Lower Jaw (Mandible)</div>
+            
+            <div style="display:flex; justify-content:center; flex-wrap:nowrap;">
+                ${lower_teeth.map(n => get_tooth_svg(n)).join('')}
+            </div>
+
+            ${get_legend_html()}
+        </div>
+    `;
+
+    container.html(html);
+    bind_events(frm);
+}
+
+function get_tooth_svg(number) {
+    return `
+        <div class="tooth-wrapper" data-tooth="${number}" style="text-align:center; width:40px; cursor:pointer;">
+            <div style="font-size:10px; margin-bottom:2px;">${number}</div>
+            <svg width="35" height="35" viewBox="0 0 40 40">
+                <polygon points="0,0 40,0 30,10 10,10" class="tooth-part" data-pos="top" fill="white" stroke="#bcbcbc"/>
+                <polygon points="40,0 40,40 30,30 30,10" class="tooth-part" data-pos="right" fill="white" stroke="#bcbcbc"/>
+                <polygon points="40,40 0,40 10,30 30,30" class="tooth-part" data-pos="bottom" fill="white" stroke="#bcbcbc"/>
+                <polygon points="0,0 0,40 10,30 10,10" class="tooth-part" data-pos="left" fill="white" stroke="#bcbcbc"/>
+                <rect x="10" y="10" width="20" height="20" class="tooth-part" data-pos="center" fill="white" stroke="#bcbcbc"/>
+            </svg>
+        </div>`;
+}
+
+function bind_events(frm) {
+    // Unbind and re-bind to avoid duplicate listeners
+    $(frm.fields_dict.odontogram_html.wrapper).off('click', '.tooth-part').on('click', '.tooth-part', function() {
+        const tooth = $(this).closest('.tooth-wrapper').attr('data-tooth');
+        const surface = $(this).attr('data-pos');
+
+        // Find existing record in the table
+        let existing_row = (frm.doc.tooth_data || []).find(d => d.tooth_number == tooth && d.surface == surface);
+
+        let d = new frappe.ui.Dialog({
+            title: `Tooth ${tooth} - ${surface}`,
+            fields: [
+                { 
+                    label: 'Status', 
+                    fieldname: 'status', 
+                    fieldtype: 'Select', 
+                    options: Object.keys(STATUS_COLORS).join('\n'), // Joins keys as options
+                    default: existing_row ? existing_row.status : 'Healthy' 
+                },
+                { 
+                    label: 'Notes', 
+                    fieldname: 'notes', 
+                    fieldtype: 'Small Text',
+                    default: existing_row ? existing_row.notes : ''
+                }
+            ],
+            primary_action_label: 'Update Chart',
+            primary_action(values) {
+                if (existing_row) {
+                    // Update the row object directly to avoid meta errors
+                    existing_row.status = values.status;
+                    existing_row.notes = values.notes;
+                } else {
+                    // Create new row
+                    let child = frm.add_child('odontogram');
+                    child.tooth_number = tooth;
+                    child.surface = surface;
+                    child.status = values.status;
+                    child.notes = values.notes;
+                }
+                
+                // Finalize changes
+                frm.refresh_field('odontogram');
+                apply_saved_colors(frm);
+                d.hide();
+				frm.save()
+            }
+        });
+        d.show();
+    });
+}
+
+function apply_saved_colors(frm) {
+    // Select all tooth parts and reset them to white
+    const $wrapper = $(frm.fields_dict.odontogram_html.wrapper);
+    $wrapper.find('.tooth-part').css('fill', 'white');
+
+    if (frm.doc.odontogram) {
+        frm.doc.odontogram.forEach(row => {
+            const color = STATUS_COLORS[row.status] || 'white';
+            const selector = `.tooth-wrapper[data-tooth="${row.tooth_number}"] .tooth-part[data-pos="${row.surface}"]`;
+            $wrapper.find(selector).css('fill', color);
+        });
+    }
+}
+frappe.dom.set_style(`
+    .tooth-part { cursor: pointer; transition: 0.2s; }
+    .tooth-part:hover { opacity: 0.8; stroke-width: 2px; }
+`);
+
+function get_legend_html() {
+    let legend = `<div style="display:flex; justify-content:center; gap:15px; margin-top:15px; font-size:12px;">`;
+    for (let status in STATUS_COLORS) {
+        legend += `
+            <div style="display:flex; align-items:center; gap:5px;">
+                <div style="width:12px; height:12px; background:${STATUS_COLORS[status]}; border:1px solid #ccc;"></div>
+                <span>${status}</span>
+            </div>`;
+    }
+    legend += `</div>`;
+    return legend;
+}
+
 
 let make_payment =  function(frm) {
 	console.log("Make Payment")
