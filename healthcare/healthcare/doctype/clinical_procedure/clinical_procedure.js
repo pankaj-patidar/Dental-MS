@@ -159,6 +159,11 @@ frappe.ui.form.on('Clinical Procedure', {
 			});
 		}
 
+		if (!frm.doc.ref_sales_invoice) {
+			frm.add_custom_button(__("Make Payment"), function () {
+				make_payment_clinical_procedure(frm);
+			})
+		}
 		frm.add_custom_button(__("Clinical Note"), function() {
 			frappe.route_options = {
 				"patient": frm.doc.patient,
@@ -167,6 +172,15 @@ frappe.ui.form.on('Clinical Procedure', {
 					frappe.new_doc("Clinical Note");
 		},__('Create'));
 
+	},
+
+	before_submit: function (frm) {
+	// Check if payment is done (Sales Invoice exists)
+		if (!frm.doc.ref_sales_invoice) {
+			frappe.throw(
+				__("Please complete the payment before submitting this Procedure.")
+			);
+		}
 	},
 
 	onload: function(frm) {
@@ -424,6 +438,182 @@ frappe.ui.form.on('Clinical Procedure Item', {
 		}
 	}
 });
+
+
+let make_payment_clinical_procedure = function (frm) {
+
+	let fields = [
+		{
+			label: "Patient",
+			fieldname: "patient",
+			fieldtype: "Data",
+			read_only: true,
+		},
+		{
+			label: "Mode of Payment",
+			fieldname: "mode_of_payment",
+			fieldtype: "Link",
+			options: "Mode of Payment",
+			reqd: 1,
+		},
+		{ fieldtype: "Column Break" },
+		{
+			label: "Procedure Charge",
+			fieldname: "procedure_charge",
+			fieldtype: "Currency",
+			reqd: 1,
+		},
+		{
+			label: "Total Payable",
+			fieldname: "total_payable",
+			fieldtype: "Currency",
+			read_only: true,
+		},
+		{
+			label: __("Additional Discount"),
+			fieldtype: "Section Break",
+			collapsible: 1,
+		},
+		{
+			label: "Discount Percentage",
+			fieldname: "discount_percentage",
+			fieldtype: "Percent",
+			default: 0,
+		},
+		{ fieldtype: "Column Break" },
+		{
+			label: "Discount Amount",
+			fieldname: "discount_amount",
+			fieldtype: "Currency",
+			default: 0,
+		}
+	];
+
+	let d = new frappe.ui.Dialog({
+		title: "Enter Payment Details",
+		fields: fields,
+		primary_action_label: "Create Invoice",
+		primary_action(values) {
+			frappe.call({
+				method: "healthcare.healthcare.doctype.clinical_procedure.clinical_procedure.invoice_clinical_procedure",
+				args: {
+					procedure_name: frm.doc.name,
+					procedure_charge: values.procedure_charge,
+					total_payable: values.total_payable,
+					discount_percentage: values.discount_percentage,
+					discount_amount: values.discount_amount,
+					mode_of_payment: values.mode_of_payment
+				},
+				callback(r) {
+					if (!r.exc) {
+						frm.reload_doc();
+						d.hide();
+					}
+				}
+			});
+		}
+	});
+
+	d.set_values({
+		patient: frm.doc.patient_name,
+		procedure_charge: frm.doc.procedure_charge,
+		total_payable: frm.doc.procedure_charge
+	});
+
+	d.show();
+
+	// -----------------------------
+	// Discount logic starts here
+	// -----------------------------
+
+	d.fields_dict.discount_percentage.df.onchange = () => {
+		validate_discount("discount_percentage");
+	};
+
+	d.fields_dict.discount_amount.df.onchange = () => {
+		validate_discount("discount_amount");
+	};
+
+	d.fields_dict.procedure_charge.df.onchange = () => {
+		recalculate_from_percentage();
+	};
+
+	function validate_discount(field) {
+		let message = "";
+
+		let discount_percentage = flt(d.get_value("discount_percentage"));
+		let discount_amount = flt(d.get_value("discount_amount"));
+		let consultation_charge = flt(d.get_value("procedure_charge"));
+
+		if (field === "discount_percentage") {
+
+			if (discount_percentage > 100 || discount_percentage < 0) {
+				d.get_primary_btn().attr("disabled", true);
+				message = "Invalid discount percentage";
+			} else {
+				d.get_primary_btn().attr("disabled", false);
+				frm.via_discount_percentage = true;
+
+				if (discount_percentage && discount_amount) {
+					d.set_value("discount_amount", 0);
+				}
+
+				discount_amount = consultation_charge * (discount_percentage / 100);
+
+				d.set_values({
+					discount_amount: discount_amount,
+					total_payable: consultation_charge - discount_amount
+				}).then(() => {
+					delete frm.via_discount_percentage;
+				});
+			}
+
+		} else if (field === "discount_amount") {
+
+			if (discount_amount < 0 || discount_amount > consultation_charge) {
+				d.get_primary_btn().attr("disabled", true);
+				message = "Discount amount should not be more than Procedure Charge";
+			} else {
+				d.get_primary_btn().attr("disabled", false);
+
+				if (!frm.via_discount_percentage && consultation_charge) {
+					discount_percentage = (discount_amount / consultation_charge) * 100;
+					d.set_values({
+						discount_percentage: discount_percentage,
+						total_payable: consultation_charge - discount_amount
+					});
+				}
+			}
+		}
+
+		if (message) {
+			frappe.msgprint({
+				message: message,
+				indicator: "red"
+			});
+		}
+	}
+
+	function recalculate_from_percentage() {
+		let consultation_charge = flt(d.get_value("procedure_charge"));
+		let discount_percentage = flt(d.get_value("discount_percentage"));
+
+		if (consultation_charge < 0 || discount_percentage < 0 || discount_percentage > 100) {
+			d.get_primary_btn().attr("disabled", true);
+			return;
+		}
+
+		let discount_amount = consultation_charge * (discount_percentage / 100);
+
+		d.get_primary_btn().attr("disabled", false);
+		d.set_values({
+			discount_amount: discount_amount,
+			total_payable: consultation_charge - discount_amount
+		});
+	}
+};
+
+
 
 let calculate_age = function(birth) {
 	let ageMS = Date.parse(Date()) - Date.parse(birth);

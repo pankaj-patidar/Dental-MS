@@ -921,6 +921,7 @@ let calculate_age = function(birth) {
 };
 
 let make_payment = function (frm, automate_invoicing) {
+	console.log("automate_invoice", automate_invoicing)
 	if (automate_invoicing) {
 		make_registration (frm, automate_invoicing);
 	}

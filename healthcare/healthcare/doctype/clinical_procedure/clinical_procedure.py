@@ -18,7 +18,12 @@ from healthcare.healthcare.doctype.service_request.service_request import (
 	update_service_request_status,
 )
 from healthcare.healthcare.utils import validate_nursing_tasks
+from frappe.utils import add_days, getdate
 
+from healthcare.healthcare.doctype.healthcare_settings.healthcare_settings import (
+	get_income_account,
+	get_receivable_account,
+)
 
 class ClinicalProcedure(Document):
 	def validate(self):
@@ -246,6 +251,118 @@ def get_stock_qty(item_code, warehouse):
 		or 0
 	)
 
+
+
+@frappe.whitelist()
+def invoice_clinical_procedure(
+	procedure_name,
+	procedure_charge=0,
+	total_payable=0,
+	discount_percentage=0,
+	discount_amount=0,
+	mode_of_payment=None
+):
+	procedure = frappe.get_doc("Clinical Procedure", procedure_name)
+
+	if procedure.get("ref_sales_invoice"):
+		frappe.throw(_("Sales Invoice already created for this Clinical Procedure"))
+
+	create_sales_invoice_for_clinical_procedure(
+		procedure,
+		procedure_charge,
+		total_payable,
+		discount_percentage,
+		discount_amount,
+		mode_of_payment
+	)
+
+def create_sales_invoice_for_clinical_procedure(
+	procedure_doc,
+	procedure_charge,
+	total_payable,
+	discount_percentage=0,
+	discount_amount=0,
+	mode_of_payment=None
+):
+	si = frappe.new_doc("Sales Invoice")
+
+	si.patient = procedure_doc.patient
+	si.customer = frappe.get_value("Patient", procedure_doc.patient, "customer")
+	si.company = procedure_doc.company
+	si.due_date = getdate()
+	si.debit_to = get_receivable_account(procedure_doc.company)
+
+	# Link to Clinical Procedure
+	si.clinical_procedure = procedure_doc.name
+
+	# ---------- Item ----------
+	item = si.append("items", {})
+	item.item_code = get_procedure_item(procedure_doc)
+	item.item_name = item.item_code
+	item.qty = 1
+	item.rate = flt(procedure_charge)
+	item.amount = flt(procedure_charge)
+
+	# ---------- Discount ----------
+	if discount_percentage:
+		si.additional_discount_percentage = flt(discount_percentage)
+
+	if discount_amount:
+		si.discount_amount = flt(discount_amount)
+
+	# ---------- Payment ----------
+	if mode_of_payment and flt(total_payable) > 0:
+		si.is_pos = 1
+		payment = si.append("payments", {})
+		payment.mode_of_payment = mode_of_payment
+		payment.amount = flt(total_payable)
+
+	si.set_missing_values(for_validate=True)
+	si.flags.ignore_mandatory = True
+	si.save(ignore_permissions=True)
+	si.submit()
+
+	# ---------- Update Procedure ----------
+	frappe.db.set_value(
+		"Clinical Procedure",
+		procedure_doc.name,
+		{
+			"ref_sales_invoice": si.name,
+			"procedure_charge": procedure_charge,
+			"paid_amount": flt(total_payable)
+
+		}
+	)
+
+	procedure_doc.notify_update()
+
+	frappe.msgprint(
+		_("Sales Invoice {0} created").format(si.name),
+		alert=True
+	)
+
+def get_procedure_item(procedure_doc):
+	# Preferred: from Clinical Procedure Template
+	if procedure_doc.procedure_template:
+		item = frappe.get_value(
+			"Clinical Procedure Template",
+			procedure_doc.procedure_template,
+			"item"
+		)
+		if item:
+			return item
+
+	# Fallback
+	item = frappe.db.get_value(
+		"Item",
+		{"item_name": ["like", "%Procedure%"], "disabled": 0},
+		"name"
+	)
+
+	if not item:
+		frappe.throw(_("No Item linked to Clinical Procedure Template"))
+
+	return item
 
 @frappe.whitelist()
 def get_procedure_consumables(procedure_template):

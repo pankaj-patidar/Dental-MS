@@ -10,9 +10,12 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.model.mapper import get_mapped_doc
 from frappe.utils import add_days, getdate
-
+from healthcare.healthcare.doctype.healthcare_settings.healthcare_settings import (
+	get_income_account,
+	get_receivable_account,
+)
 from healthcare.healthcare.utils import get_medical_codes
-
+from frappe.utils import flt, format_date, get_link_to_form, get_time, getdate
 
 class PatientEncounter(Document):
 	def validate(self):
@@ -323,6 +326,131 @@ class PatientEncounter(Document):
 			["posting_date", "note", "name", "practitioner", "user", "clinical_note_type"],
 		)
 
+@frappe.whitelist()
+def invoice_encounter(
+	encounter_name,
+	consultation_charge=0,
+	total_payable=0,
+	discount_percentage=0,
+	discount_amount=0
+):
+	encounter_doc = frappe.get_doc("Patient Encounter", encounter_name)
+
+	# Prevent duplicate invoicing
+	if encounter_doc.get("ref_sales_invoice"):
+		frappe.throw(_("Sales Invoice already created for this Encounter"))
+
+	create_sales_invoice_for_encounter(
+		encounter_doc,
+		consultation_charge,
+		total_payable,
+		discount_percentage,
+		discount_amount
+	)
+
+def create_sales_invoice_for_encounter(
+	encounter_doc,
+	consultation_charge,
+	total_payable,
+	discount_percentage=0,
+	discount_amount=0
+	):
+		sales_invoice = frappe.new_doc("Sales Invoice")
+
+		# Basic details
+		sales_invoice.patient = encounter_doc.patient
+		sales_invoice.customer = frappe.get_value(
+			"Patient", encounter_doc.patient, "customer"
+		)
+		sales_invoice.company = encounter_doc.company
+		sales_invoice.due_date = getdate()
+		sales_invoice.debit_to = get_receivable_account(encounter_doc.company)
+
+		# Custom link field (recommended)
+		sales_invoice.patient_encounter = encounter_doc.name
+
+		# ---------- Invoice Item ----------
+		item = sales_invoice.append("items", {})
+
+		item.item_code = get_consultation_item(encounter_doc)
+		item.item_name = item.item_code
+		item.qty = 1
+		item.rate = flt(consultation_charge)
+		item.amount = flt(consultation_charge)
+
+		# ---------- Discount Logic ----------
+		net_payable = flt(consultation_charge)
+
+		if flt(discount_percentage):
+			sales_invoice.additional_discount_percentage = flt(discount_percentage)
+			net_payable -= net_payable * (flt(discount_percentage) / 100)
+
+		if flt(discount_amount):
+			sales_invoice.discount_amount = flt(discount_amount)
+			net_payable -= flt(discount_amount)
+
+		sales_invoice.total = net_payable
+		sales_invoice.base_paid_amount = net_payable
+		# ---------- Payments ----------
+		if encounter_doc.mode_of_payment and net_payable > 0:
+			sales_invoice.is_pos = 1
+			payment = sales_invoice.append("payments", {})
+			payment.mode_of_payment = encounter_doc.mode_of_payment
+			payment.amount = net_payable
+
+		# ---------- Save & Submit ----------
+		sales_invoice.set_missing_values(for_validate=True)
+		sales_invoice.flags.ignore_mandatory = True
+		sales_invoice.save(ignore_permissions=True)
+		sales_invoice.submit()
+
+		# ---------- Update Encounter ----------
+		frappe.db.set_value(
+			"Patient Encounter",
+			encounter_doc.name,
+			{
+				"ref_sales_invoice": sales_invoice.name,
+				"consultation_charge": consultation_charge,
+				"paid_amount": net_payable
+			}
+		)
+
+		encounter_doc.notify_update()
+
+		frappe.msgprint(
+			_("Sales Invoice {0} created").format(sales_invoice.name),
+			alert=True
+		)
+
+def get_consultation_item(encounter_doc):
+	item_code = None
+
+	# Practitioner specific item
+	if encounter_doc.practitioner:
+		item_code = frappe.get_value(
+			"Healthcare Practitioner",
+			encounter_doc.practitioner,
+			"inpatient_visit_charge_item"
+		)
+
+	# Keyword fallback → "Procedure"
+	if not item_code:
+		item_code = frappe.db.get_value(
+			"Item",
+			{
+				"item_name": ["like", "%Procedure%"],
+				"disabled": 0
+			},
+			"name"
+		)
+
+	# Hard safety
+	if not item_code:
+		frappe.throw(
+			_("No Consultation Item found. Please configure Practitioner, inpatient_visit_charge_item, or create an Item with name containing 'Procedure'")
+		)
+
+	return item_code
 
 @frappe.whitelist()
 def make_ip_medication_order(source_name, target_doc=None):

@@ -108,6 +108,12 @@ frappe.ui.form.on('Patient Encounter', {
 				frappe.new_doc("Clinical Note");
 			},__('Create'));
 
+			if (!frm.doc.ref_sales_invoice){
+				frm.add_custom_button(__("Make Payment"), function(){
+					make_payment(frm);
+					})
+			}
+			
 
 			if (frm.doc.drug_prescription && frm.doc.inpatient_record && frm.doc.inpatient_status === "Admitted") {
 				frm.add_custom_button(__('Inpatient Medication Order'), function() {
@@ -200,6 +206,14 @@ frappe.ui.form.on('Patient Encounter', {
 		apply_code_sm_filter_to_child(frm, "intent", table_list, "Intent")
 	},
 
+	before_submit: function (frm) {
+	// Check if payment is done (Sales Invoice exists)
+		if (!frm.doc.ref_sales_invoice) {
+			frappe.throw(
+				__("Please complete the payment before submitting this Encounter.")
+			);
+		}
+	},
 	appointment: function(frm) {
 		frm.events.set_appointment_fields(frm);
 	},
@@ -324,6 +338,229 @@ frappe.ui.form.on('Patient Encounter', {
 	},
 
 });
+
+let make_payment =  function(frm) {
+	console.log("Make Payment")
+	automate_invoicing = 1
+	make_registration(frm, automate_invoicing);
+	
+	function make_registration (frm, automate_invoicing) {
+
+		let fields = [
+			{
+				label: "Patient",
+				fieldname: "patient",
+				fieldtype: "Data",
+				read_only: true,
+			},
+			{
+				label: "Mode of Payment",
+				fieldname: "mode_of_payment",
+				fieldtype: "Link",
+				options: "Mode of Payment",
+				reqd: 1,
+			},
+			{
+				fieldtype: "Column Break",
+			},
+			{
+				label: "Consultation Charge",
+				fieldname: "consultation_charge",
+				fieldtype: "Currency",
+				read_only: false,
+			},
+			{
+				label: "Total Payable",
+				fieldname: "total_payable",
+				fieldtype: "Currency",
+				read_only: true,
+			},
+			{
+				label: __("Additional Discount"),
+				fieldtype:"Section Break",
+				collapsible: 1,
+			},
+			{
+				label: "Discount Percentage",
+				fieldname: "discount_percentage",
+				fieldtype: "Percent",
+				default: 0,
+			},
+			{
+				fieldtype: "Column Break",
+			},
+			{
+				label: "Discount Amount",
+				fieldname: "discount_amount",
+				fieldtype: "Currency",
+				default: 0,
+			}
+		];
+
+		if (frm.doc.appointment_for == "Practitioner") {
+			let pract_dict = {
+				label: "Practitioner",
+				fieldname: "practitioner",
+				fieldtype: "Data",
+				read_only: true,
+			};
+			fields.splice(3, 0, pract_dict);
+		} else if (frm.doc.appointment_for == "Service Unit") {
+			let su_dict = {
+				label: "Service Unit",
+				fieldname: "service_unit",
+				fieldtype: "Data",
+				read_only: true,
+			};
+			fields.splice(3, 0, su_dict);
+		} else if (frm.doc.appointment_for == "Department") {
+			let dept_dict = {
+				label: "Department",
+				fieldname: "department",
+				fieldtype: "Data",
+				read_only: true,
+			};
+			fields.splice(3, 0, dept_dict);
+		}
+
+		if (automate_invoicing) {
+			show_payment_dialog(frm, fields);
+		}
+	}
+	function show_payment_dialog(frm, fields) {
+		let d = new frappe.ui.Dialog({
+			title: "Enter Payment Details",
+			fields: fields,
+			primary_action_label: "Create Invoice",
+			primary_action: async function(values) {
+				if (frm.is_dirty()) {
+					await frm.save();
+				}
+				frappe.call({
+					method: "healthcare.healthcare.doctype.patient_encounter.patient_encounter.invoice_encounter",
+					args: {
+						"encounter_name": frm.doc.name,
+						"consultation_charge": values.consultation_charge,
+						"total_payable": values.total_payable,
+						"discount_percentage": values.discount_percentage,
+						"discount_amount": values.discount_amount
+					},
+					callback: async function (data) {
+						if (!data.exc) {
+							await frm.reload_doc();
+							if (frm.doc.ref_sales_invoice) {
+								d.get_field("mode_of_payment").$input.prop("disabled", true);
+								d.get_field("discount_percentage").$input.prop("disabled", true);
+								d.get_field("discount_amount").$input.prop("disabled", true);
+								d.get_primary_btn().attr("disabled", true);
+								d.get_secondary_btn().attr("disabled", false);
+							}
+						}
+					}
+				});
+			},
+			secondary_action_label: __(`<svg class="icon  icon-sm" style="">
+				<use class="" href="#icon-printer"></use>
+			</svg>`),
+			secondary_action() {
+				window.open("/app/print/Sales Invoice/" + frm.doc.ref_sales_invoice, "_blank");
+				d.hide();
+			}
+		});
+		d.fields_dict["mode_of_payment"].df.onchange = () => {
+			if (d.get_value("mode_of_payment")) {
+				frm.set_value("mode_of_payment", d.get_value("mode_of_payment"));
+			}
+		};
+		d.fields_dict["consultation_charge"].df.onchange = () => {
+			frm.set_value("paid_amount", d.get_value("total_payable"));
+			recalculate_from_percentage();
+		};
+		d.get_secondary_btn().attr("disabled", true);
+		d.set_values({
+			"patient": frm.doc.patient_name,
+			"consultation_charge": frm.doc.consultation_charge,
+			"total_payable": frm.doc.paid_amount,
+		});
+
+		if (frm.doc.appointment_for == "Practitioner") {
+			d.set_value("practitioner", frm.doc.practitioner_name);
+		} else if (frm.doc.appointment_for == "Service Unit") {
+			d.set_value("service_unit", frm.doc.service_unit);
+		} else if (frm.doc.appointment_for == "Department") {
+			d.set_value("department", frm.doc.department);
+		}
+
+		if (frm.doc.mode_of_payment) {
+			d.set_value("mode_of_payment", frm.doc.mode_of_payment);
+		}
+		d.show();
+
+		d.fields_dict["discount_percentage"].df.onchange = () => validate_discount("discount_percentage");
+		d.fields_dict["discount_amount"].df.onchange = () => validate_discount("discount_amount");
+
+		function validate_discount(field) {
+			let message = "";
+			let discount_percentage = d.get_value("discount_percentage");
+			let discount_amount = d.get_value("discount_amount");
+			let consultation_charge = d.get_value("consultation_charge");
+
+			if (field === "discount_percentage") {
+				if (discount_percentage > 100 || discount_percentage < 0) {
+					d.get_primary_btn().attr("disabled", true);
+					message = "Invalid discount percentage";
+				} else {
+					d.get_primary_btn().attr("disabled", false);
+					frm.via_discount_percentage = true;
+					if (discount_percentage && discount_amount) {
+						d.set_value("discount_amount", 0);
+					}
+					discount_amount = consultation_charge * (discount_percentage / 100);
+
+					d.set_values({
+						"discount_amount": discount_amount,
+						"total_payable": consultation_charge - discount_amount,
+					}).then(() => delete frm.via_discount_percentage);
+				}
+			} else if (field === "discount_amount") {
+				if (consultation_charge < discount_amount || discount_amount < 0) {
+					d.get_primary_btn().attr("disabled", true);
+					message = "Discount amount should not be more than Consultation Charge";
+				} else {
+					d.get_primary_btn().attr("disabled", false);
+					if (!frm.via_discount_percentage) {
+						discount_percentage = (discount_amount / consultation_charge) * 100;
+						d.set_values({
+							"discount_percentage": discount_percentage,
+							"total_payable": consultation_charge - discount_amount,
+						});
+					}
+				}
+			}
+			show_message(d, message, field);
+		}
+		function recalculate_from_percentage() {
+			let consultation_charge = flt(d.get_value("consultation_charge"));
+			let discount_percentage = flt(d.get_value("discount_percentage"));
+
+			// Safety check
+			if (consultation_charge < 0 || discount_percentage < 0 || discount_percentage > 100) {
+				d.get_primary_btn().attr("disabled", true);
+				return;
+			}
+
+			let discount_amount = consultation_charge * (discount_percentage / 100);
+
+			d.get_primary_btn().attr("disabled", false);
+
+			d.set_values({
+				discount_amount: discount_amount,
+				total_payable: consultation_charge - discount_amount
+			});
+		}
+
+	}
+};
 
 var schedule_inpatient = function(frm) {
 	let service_unit_type = "";
