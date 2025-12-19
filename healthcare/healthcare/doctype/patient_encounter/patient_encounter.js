@@ -54,8 +54,12 @@ frappe.ui.form.on('Patient Encounter', {
         }
 
         // Render chart
-		render_odontogram(frm);
-        apply_saved_colors(frm);
+		// render_odontogram(frm);
+        // apply_saved_colors(frm);
+
+		// Default view mode if not set
+        if (!frm.odontogram_view) frm.odontogram_view = 'anatomical';
+        render_odontogram(frm);
 
 		if (!frm.doc.__islocal) {
 			if (frm.doc.docstatus === 1) {
@@ -348,103 +352,137 @@ frappe.ui.form.on('Patient Encounter', {
 
 })
 
-// Mapping statuses to fixed professional colors
+// ------------------------------------
+
+/***************************************************
+ * CONFIGURATION
+ ***************************************************/
+const CHILD_TABLE_FIELD = "odontogram";
 const STATUS_COLORS = {
-    'Caries': '#FF5858',   // Red
-    'Filled': '#5897FF',   // Blue
-    'Missing': '#4a4a4a',  // Dark Grey
-    'Bridge': '#FACC15',   // Golden/Yellow
-    'Healthy': '#FFFFFF'   // White
+    'Caries': '#FF5858',
+    'Filled': '#5897FF',
+    'Missing': '#4a4a4a',
+    'Bridge': '#FACC15',
+    'Healthy': '#FFFFFF'
 };
 
+/***************************************************
+ * 1. SVG GENERATORS
+ ***************************************************/
+
+// Anatomical View (Colleague's Style)
+function get_anatomical_svg(tooth, x, y) {
+    return `
+    <g class="tooth-wrapper" data-tooth="${tooth}" transform="translate(${x}, ${y}) scale(0.65)">
+        <path class="tooth-outline" d="M32 6 C20 6 10 14 10 26 C10 34 14 42 16 48 C18 54 18 86 26 86 C30 86 30 64 32 64 C34 64 34 86 38 86 C46 86 46 54 48 48 C50 42 54 34 54 26 C54 14 44 6 32 6 Z" fill="white" stroke="#333" stroke-width="1.5"/>
+        <path class="tooth-part" data-pos="top"    d="M14 6 H50 V18 H14 Z" fill="white" stroke="#999"/>
+        <path class="tooth-part" data-pos="center" d="M18 18 H46 V46 H18 Z" fill="white" stroke="#999"/>
+        <path class="tooth-part" data-pos="bottom" d="M14 46 H50 V58 H14 Z" fill="white" stroke="#999"/>
+        <path class="tooth-part" data-pos="left"   d="M6 18 H18 V46 H6 Z" fill="white" stroke="#999"/>
+        <path class="tooth-part" data-pos="right"  d="M46 18 H58 V46 H46 Z" fill="white" stroke="#999"/>
+        <text x="32" y="100" font-size="16" text-anchor="middle" font-weight="bold" fill="#333">${tooth}</text>
+    </g>`;
+}
+
+// Schematic View (Square/Simplified Style)
+function get_schematic_svg(tooth, x, y) {
+    return `
+    <g class="tooth-wrapper" data-tooth="${tooth}" transform="translate(${x}, ${y})">
+        <polygon points="0,0 40,0 30,10 10,10" class="tooth-part" data-pos="top" fill="white" stroke="#bcbcbc"/>
+        <polygon points="40,0 40,40 30,30 30,10" class="tooth-part" data-pos="right" fill="white" stroke="#bcbcbc"/>
+        <polygon points="40,40 0,40 10,30 30,30" class="tooth-part" data-pos="bottom" fill="white" stroke="#bcbcbc"/>
+        <polygon points="0,0 0,40 10,30 10,10" class="tooth-part" data-pos="left" fill="white" stroke="#bcbcbc"/>
+        <rect x="10" y="10" width="20" height="20" class="tooth-part" data-pos="center" fill="white" stroke="#bcbcbc"/>
+        <text x="20" y="55" font-size="12" text-anchor="middle" font-weight="bold">${tooth}</text>
+    </g>`;
+}
+
+/***************************************************
+ * 2. RENDERER
+ ***************************************************/
 function render_odontogram(frm) {
-    const container = $(frm.fields_dict.odontogram_html.wrapper);
-    const upper_teeth = [18, 17, 16, 15, 14, 13, 12, 11, 21, 22, 23, 24, 25, 26, 27, 28];
-    const lower_teeth = [48, 47, 46, 45, 44, 43, 42, 41, 31, 32, 33, 34, 35, 36, 37, 38];
+    const wrapper = $(frm.fields_dict.odontogram_html.wrapper);
+    wrapper.empty();
 
+    const is_ana = (frm.odontogram_view === 'anatomical');
+    
+    // Toggle Button UI
     let html = `
-        <div class="odontogram-container" style="background:#fff; border:1px solid #d1d8dd; padding:20px; border-radius:8px; box-shadow: inset 0 0 5px rgba(0,0,0,0.05);">
-            
-            <div style="text-align:center; color:#888; font-size:10px; text-transform:uppercase; margin-bottom:10px; letter-spacing:1px;">Upper Jaw (Maxilla)</div>
-            
-            <div style="display:flex; justify-content:center; margin-bottom:25px; flex-wrap:nowrap;">
-                ${upper_teeth.map(n => get_tooth_svg(n)).join('')}
+        <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
+            <div class="btn-group">
+                <button class="btn btn-default btn-sm btn-view ${is_ana ? 'btn-primary' : ''}" data-view="anatomical">Anatomical</button>
+                <button class="btn btn-default btn-sm btn-view ${!is_ana ? 'btn-primary' : ''}" data-view="schematic">Schematic</button>
             </div>
-
-            <div style="text-align:center; color:#888; font-size:10px; text-transform:uppercase; margin-bottom:10px; letter-spacing:1px;">Lower Jaw (Mandible)</div>
-            
-            <div style="display:flex; justify-content:center; flex-wrap:nowrap;">
-                ${lower_teeth.map(n => get_tooth_svg(n)).join('')}
-            </div>
-
+            <div style="font-size: 12px; font-weight: bold; color: #666;">FDI NOTATION</div>
+        </div>
+        <div class="chart-container" style="background:#fff; border:1px solid #d1d8dd; padding:20px; border-radius:8px;">
+            <svg id="odontogram-svg" viewBox="0 0 1000 ${is_ana ? 350 : 250}" style="width:100%">
+                ${generate_rows(is_ana)}
+            </svg>
             ${get_legend_html()}
         </div>
     `;
 
-    container.html(html);
-    bind_events(frm);
+    wrapper.append(html);
+    bind_events(frm, wrapper);
+    apply_saved_colors(frm);
 }
 
-function get_tooth_svg(number) {
-    return `
-        <div class="tooth-wrapper" data-tooth="${number}" style="text-align:center; width:40px; cursor:pointer;">
-            <div style="font-size:10px; margin-bottom:2px;">${number}</div>
-            <svg width="35" height="35" viewBox="0 0 40 40">
-                <polygon points="0,0 40,0 30,10 10,10" class="tooth-part" data-pos="top" fill="white" stroke="#bcbcbc"/>
-                <polygon points="40,0 40,40 30,30 30,10" class="tooth-part" data-pos="right" fill="white" stroke="#bcbcbc"/>
-                <polygon points="40,40 0,40 10,30 30,30" class="tooth-part" data-pos="bottom" fill="white" stroke="#bcbcbc"/>
-                <polygon points="0,0 0,40 10,30 10,10" class="tooth-part" data-pos="left" fill="white" stroke="#bcbcbc"/>
-                <rect x="10" y="10" width="20" height="20" class="tooth-part" data-pos="center" fill="white" stroke="#bcbcbc"/>
-            </svg>
-        </div>`;
+function generate_rows(is_ana) {
+    const fn = is_ana ? get_anatomical_svg : get_schematic_svg;
+    const spacing = is_ana ? 60 : 55;
+    
+    let rows = "";
+    // Upper
+    [18,17,16,15,14,13,12,11].forEach((t, i) => rows += fn(t, 20 + i * spacing, 20));
+    [21,22,23,24,25,26,27,28].forEach((t, i) => rows += fn(t, 520 + i * spacing, 20));
+    // Lower
+    [48,47,46,45,44,43,42,41].forEach((t, i) => rows += fn(t, 20 + i * spacing, is_ana ? 180 : 130));
+    [31,32,33,34,35,36,37,38].forEach((t, i) => rows += fn(t, 520 + i * spacing, is_ana ? 180 : 130));
+    
+    return rows;
 }
 
-function bind_events(frm) {
-    // Unbind and re-bind to avoid duplicate listeners
-    $(frm.fields_dict.odontogram_html.wrapper).off('click', '.tooth-part').on('click', '.tooth-part', function() {
+/***************************************************
+ * 3. EVENTS & DATA
+ ***************************************************/
+function bind_events(frm, wrapper) {
+    // View Switcher
+    wrapper.find('.btn-view').on('click', function() {
+        frm.odontogram_view = $(this).data('view');
+        render_odontogram(frm);
+    });
+
+    // Tooth Click
+    wrapper.off('click', '.tooth-part').on('click', '.tooth-part', function() {
         const tooth = $(this).closest('.tooth-wrapper').attr('data-tooth');
         const surface = $(this).attr('data-pos');
-
-        // Find existing record in the table
-        let existing_row = (frm.doc.tooth_data || []).find(d => d.tooth_number == tooth && d.surface == surface);
+        
+        // Find existing record
+        let existing = (frm.doc[CHILD_TABLE_FIELD] || []).find(r => r.tooth_number == tooth && r.surface == surface);
 
         let d = new frappe.ui.Dialog({
             title: `Tooth ${tooth} - ${surface}`,
             fields: [
-                { 
-                    label: 'Status', 
-                    fieldname: 'status', 
-                    fieldtype: 'Select', 
-                    options: Object.keys(STATUS_COLORS).join('\n'), // Joins keys as options
-                    default: existing_row ? existing_row.status : 'Healthy' 
-                },
-                { 
-                    label: 'Notes', 
-                    fieldname: 'notes', 
-                    fieldtype: 'Small Text',
-                    default: existing_row ? existing_row.notes : ''
-                }
+                { label: 'Status', fieldname: 'status', fieldtype: 'Select', options: Object.keys(STATUS_COLORS).join('\n'), default: existing ? existing.status : 'Healthy' },
+                { label: 'Notes', fieldname: 'notes', fieldtype: 'Small Text', default: existing ? existing.notes : '' }
             ],
-            primary_action_label: 'Update Chart',
+            primary_action_label: 'Update',
             primary_action(values) {
-                if (existing_row) {
-                    // Update the row object directly to avoid meta errors
-                    existing_row.status = values.status;
-                    existing_row.notes = values.notes;
+                if (values.status === "Healthy") {
+                    if (existing) frm.clear_table(CHILD_TABLE_FIELD, existing.name);
                 } else {
-                    // Create new row
-                    let child = frm.add_child('odontogram');
-                    child.tooth_number = tooth;
-                    child.surface = surface;
-                    child.status = values.status;
-                    child.notes = values.notes;
+                    let row = existing || frm.add_child(CHILD_TABLE_FIELD);
+                    frappe.model.set_value(row.doctype, row.name, {
+                        tooth_number: tooth,
+                        surface: surface,
+                        status: values.status,
+                        notes: values.notes
+                    });
                 }
-                
-                // Finalize changes
-                frm.refresh_field('odontogram');
+                frm.refresh_field(CHILD_TABLE_FIELD);
                 apply_saved_colors(frm);
                 d.hide();
-				frm.save()
             }
         });
         d.show();
@@ -452,37 +490,25 @@ function bind_events(frm) {
 }
 
 function apply_saved_colors(frm) {
-    // Select all tooth parts and reset them to white
-    const $wrapper = $(frm.fields_dict.odontogram_html.wrapper);
-    $wrapper.find('.tooth-part').css('fill', 'white');
+    const $svg = $(frm.fields_dict.odontogram_html.wrapper);
+    $svg.find('.tooth-part').css('fill', 'white');
 
-    if (frm.doc.odontogram) {
-        frm.doc.odontogram.forEach(row => {
-            const color = STATUS_COLORS[row.status] || 'white';
-            const selector = `.tooth-wrapper[data-tooth="${row.tooth_number}"] .tooth-part[data-pos="${row.surface}"]`;
-            $wrapper.find(selector).css('fill', color);
-        });
-    }
+    (frm.doc[CHILD_TABLE_FIELD] || []).forEach(row => {
+        const color = STATUS_COLORS[row.status] || 'white';
+        $svg.find(`.tooth-wrapper[data-tooth="${row.tooth_number}"] .tooth-part[data-pos="${row.surface}"]`)
+            .css('fill', color);
+    });
 }
-frappe.dom.set_style(`
-    .tooth-part { cursor: pointer; transition: 0.2s; }
-    .tooth-part:hover { opacity: 0.8; stroke-width: 2px; }
-`);
 
 function get_legend_html() {
-    let legend = `<div style="display:flex; justify-content:center; gap:15px; margin-top:15px; font-size:12px;">`;
-    for (let status in STATUS_COLORS) {
-        legend += `
-            <div style="display:flex; align-items:center; gap:5px;">
-                <div style="width:12px; height:12px; background:${STATUS_COLORS[status]}; border:1px solid #ccc;"></div>
-                <span>${status}</span>
-            </div>`;
+    let legend = `<div style="display:flex; justify-content:center; gap:15px; margin-top:15px; font-size:11px; border-top:1px solid #eee; padding-top:10px;">`;
+    for (let s in STATUS_COLORS) {
+        legend += `<div style="display:flex; align-items:center; gap:5px;"><div style="width:10px; height:10px; background:${STATUS_COLORS[s]}; border:1px solid #ccc;"></div><span>${s}</span></div>`;
     }
-    legend += `</div>`;
-    return legend;
+    return legend + `</div>`;
 }
 
-
+// ------------------------------------
 let make_payment =  function(frm) {
 	console.log("Make Payment")
 	automate_invoicing = 1
